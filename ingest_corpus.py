@@ -129,6 +129,9 @@ def ingest(corpus_path: Path) -> None:
     log.info("Produced %d chunks.", len(chunks))
 
     # ── 4. Initialise Supabase & Model ───────────────────────────────────────
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
     if not supabase_url or not supabase_key:
