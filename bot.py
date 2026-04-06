@@ -40,6 +40,8 @@ from token_logger import TokenLogger
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+Path("logs").mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -304,5 +306,4 @@ async def _handle_query(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    Path("logs").mkdir(exist_ok=True)
     bot.run(DISCORD_TOKEN, log_handler=None)  # log_handler=None = use our config
