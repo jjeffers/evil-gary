@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import chromadb
-from chromadb.utils import embedding_functions
+from sentence_transformers import SentenceTransformer
+from supabase import create_client, Client
 from openai import AsyncOpenAI
 
 log = logging.getLogger(__name__)
@@ -29,8 +29,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-COLLECTION_NAME = "evil_gary"
-DEFAULT_DB_PATH = Path(".chromadb")
 TOP_K_RESULTS = 5          # retrieve the five most relevant scrolls
 MAX_CONTEXT_CHARS = 2_000  # trim retrieved context to stay within token budget
 CHAT_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
@@ -98,7 +96,6 @@ class GaryRAGEngine:
 
     def __init__(
         self,
-        db_path: Path = DEFAULT_DB_PATH,
         top_k: int = TOP_K_RESULTS,
         chat_model: str = CHAT_MODEL,
     ) -> None:
@@ -109,38 +106,45 @@ class GaryRAGEngine:
             api_key=os.environ.get("OPENROUTER_API_KEY")
         )
 
-        log.info("Opening ChromaDB at '%s'…", db_path)
-        client = chromadb.PersistentClient(path=str(db_path))
+        supabase_url = os.environ.get("SUPABASE_URL")
+        supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+        if not supabase_url or not supabase_key:
+            raise ValueError("SUPABASE_URL or SUPABASE_SERVICE_KEY not set in environment.")
 
-        ef = embedding_functions.DefaultEmbeddingFunction()
+        log.info("Connecting to Supabase…")
+        self._supabase: Client = create_client(supabase_url, supabase_key)
 
-        self._collection = client.get_collection(
-            name=COLLECTION_NAME,
-            embedding_function=ef,
-        )
-        doc_count = self._collection.count()
-        log.info(
-            "Lich's Tomb contains %d documents.  The DM's Screen is raised.  "
-            "Cheers, Gary.", doc_count,
-        )
+        log.info("Loading sentence-transformers model 'all-MiniLM-L6-v2'…")
+        self._model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        log.info("The DM's Screen is raised. Cheers, Gary.")
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
 
     def _retrieve(self, query: str) -> tuple[list[str], float]:
         """
-        Query ChromaDB for the most relevant Gygaxian fragments.
+        Query Supabase pgvector for the most relevant Gygaxian fragments.
         Returns (list_of_document_strings, elapsed_ms).
         Must complete well under 500ms to honour Discord's heartbeat.
         """
         t0 = time.perf_counter()
-        results = self._collection.query(
-            query_texts=[query],
-            n_results=self.top_k,
-            include=["documents", "distances"],
-        )
+        
+        # 1. Embed query
+        query_embedding = self._model.encode([query]).tolist()[0]
+        
+        # 2. Similarity search using Supabase RPC
+        response = self._supabase.rpc(
+            "match_gary_knowledge",
+            {
+                "query_embedding": query_embedding,
+                "match_threshold": 0.0,
+                "match_count": self.top_k,
+            }
+        ).execute()
+        
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
-        docs: list[str] = results["documents"][0] if results["documents"] else []
+        docs: list[str] = [doc["content"] for doc in response.data] if response.data else []
 
         if elapsed_ms > 400:
             log.warning(

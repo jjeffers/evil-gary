@@ -6,26 +6,26 @@ metadata, and entombs the resulting wisdom within a ChromaDB vector
 collection for future thaumaturgy.
 
 Usage:
-    python ingest_corpus.py [--corpus data/corpus.txt] [--db-path .chromadb]
+    python ingest_corpus.py [--corpus data/corpus.txt]
 
 Col_Pladoh
 """
 
 import argparse
 import logging
+import os
 import re
 import sys
 import time
 from pathlib import Path
 
-import chromadb
-from chromadb.utils import embedding_functions
+from sentence_transformers import SentenceTransformer
+from supabase import create_client, Client
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 DEFAULT_CORPUS = Path("data/corpus.txt")
-DEFAULT_DB_PATH = Path(".chromadb")
 COLLECTION_NAME = "evil_gary"
 CHUNK_SIZE = 500          # characters per chunk — optimal for verisimilitude
 CHUNK_OVERLAP = 75        # overlap to preserve contextual continuity
@@ -98,7 +98,7 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 # Ingestion orchestrator
 # ---------------------------------------------------------------------------
 
-def ingest(corpus_path: Path, db_path: Path) -> None:
+def ingest(corpus_path: Path) -> None:
     """
     Main ingestion pipeline.  Reads, cleans, chunks, embeds, and stores.
     The entire ritual completes faster than a grognard can dispute THAC0.
@@ -128,45 +128,45 @@ def ingest(corpus_path: Path, db_path: Path) -> None:
     chunks = chunk_text(clean, CHUNK_SIZE, CHUNK_OVERLAP)
     log.info("Produced %d chunks.", len(chunks))
 
-    # ── 4. Initialise ChromaDB ────────────────────────────────────────────────
-    log.info("Conjuring ChromaDB at '%s'…", db_path)
-    client = chromadb.PersistentClient(path=str(db_path))
+    # ── 4. Initialise Supabase & Model ───────────────────────────────────────
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not supabase_key:
+        log.error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in environment.")
+        sys.exit(1)
 
-    ef = embedding_functions.DefaultEmbeddingFunction()
+    log.info("Connecting to Supabase at '%s'…", supabase_url)
+    supabase: Client = create_client(supabase_url, supabase_key)
 
-    collection = client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=ef,
-        metadata={"hnsw:space": "cosine"},
-    )
-
-    existing = collection.count()
-    if existing > 0:
-        log.warning(
-            "Collection already contains %d documents.  "
-            "Proceeding will upsert — duplicates shall be vanquished.",
-            existing,
-        )
+    log.info("Loading sentence-transformers model 'all-MiniLM-L6-v2'…")
+    model = SentenceTransformer("all-MiniLM-L6-v2")
 
     # ── 5. Batch upsert ───────────────────────────────────────────────────────
-    log.info("Entombing %d chunks into ChromaDB in batches of %d…",
+    log.info("Entombing %d chunks into Supabase in batches of %d…",
              len(chunks), BATCH_SIZE)
     t0 = time.perf_counter()
     total_upserted = 0
 
     for batch_start in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[batch_start: batch_start + BATCH_SIZE]
-        ids = [f"gary_{batch_start + i:06d}" for i in range(len(batch))]
-        metadatas = [
-            {
-                "chunk_index": batch_start + i,
-                "char_count": len(chunk),
-                "source": "corpus.txt",
-            }
-            for i, chunk in enumerate(batch)
-        ]
+        
+        # Generate embeddings directly using sentence-transformers
+        embeddings = model.encode(batch).tolist()
+        
+        records = []
+        for i, chunk in enumerate(batch):
+            records.append({
+                "id": f"gary_{batch_start + i:06d}",
+                "content": chunk,
+                "metadata": {
+                    "chunk_index": batch_start + i, 
+                    "char_count": len(chunk), 
+                    "source": "corpus.txt"
+                },
+                "embedding": embeddings[i]
+            })
 
-        collection.upsert(documents=batch, ids=ids, metadatas=metadatas)
+        supabase.table("gary_knowledge").upsert(records).execute()
         total_upserted += len(batch)
         log.info("  Upserted batch ending at chunk %d / %d",
                  batch_start + len(batch), len(chunks))
@@ -191,11 +191,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS,
                    help=f"Path to corpus.txt (default: {DEFAULT_CORPUS})")
-    p.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH,
-                   help=f"ChromaDB persistence directory (default: {DEFAULT_DB_PATH})")
     return p
 
 
 if __name__ == "__main__":
     args = build_parser().parse_args()
-    ingest(corpus_path=args.corpus, db_path=args.db_path)
+    ingest(corpus_path=args.corpus)
