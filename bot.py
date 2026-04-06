@@ -71,8 +71,6 @@ if _raw_channels:
         if cid.isdigit():
             PASSIVE_CHANNELS.add(int(cid))
 
-DB_PATH = Path(os.environ.get("CHROMA_DB_PATH", ".chromadb"))
-
 # ---------------------------------------------------------------------------
 # In-character error / status messages
 # ---------------------------------------------------------------------------
@@ -144,7 +142,7 @@ async def on_ready() -> None:
     _logger = TokenLogger()
 
     try:
-        _engine = GaryRAGEngine(db_path=DB_PATH)
+        _engine = GaryRAGEngine()
     except Exception as exc:
         log.exception(
             "Failed to raise the Lich's Tomb: %s.  "
