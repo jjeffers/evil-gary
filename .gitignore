@@ -1,0 +1,23 @@
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Database
+.chromadb/
+
+# Logs
+logs/
+
+# Data
+data/corpus.txt
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

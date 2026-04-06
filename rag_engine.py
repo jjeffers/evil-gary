@@ -1,0 +1,234 @@
+"""
+rag_engine.py — The DM's Screen
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Retrieval-Augmented Generation logic.  Given a mortal's query, this module
+reaches into the Lich's Tomb (ChromaDB), retrieves the most relevant
+Gygaxian utterances, and constructs a prompt worthy of the Master.
+
+The entire operation must complete in under 500ms lest Discord's
+heartbeat timeout strike us down like a fumbled saving throw.
+
+Col_Pladoh
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+import chromadb
+from chromadb.utils import embedding_functions
+from openai import AsyncOpenAI
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+COLLECTION_NAME = "evil_gary"
+DEFAULT_DB_PATH = Path(".chromadb")
+TOP_K_RESULTS = 5          # retrieve the five most relevant scrolls
+MAX_CONTEXT_CHARS = 2_000  # trim retrieved context to stay within token budget
+CHAT_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
+MAX_TOKENS = 600           # Gary is verbose, but not infinitely so
+
+# ---------------------------------------------------------------------------
+# The Gygaxian System Prompt — the DM's Screen itself
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT_TEMPLATE = """\
+You are Gary Gygax, the legendary co-creator of Dungeons & Dragons, speaking \
+on an internet forum circa 2005 under the handle Col_Pladoh.  You are \
+authoritative, verbose, and slightly skeptical of modern "rules-light" systems. \
+You prize verisimilitude above all else.
+
+PERSONA RULES:
+- Speak with the gravitas of a myrmidon of wargaming history.
+- Employ terms naturally: verisimilitude, myrmidon, grognard, fortnight, thaumaturgy, \
+  appurtenance, legerdemain, prestidigitation.
+- Reference AD&D 1st Edition as the pinnacle of game design.
+- Be mildly dismissive of 3rd edition and beyond, though never cruel.
+- End every response with "Cheers, Gary" or "Col_Pladoh".
+- If the corpus context does not contain a relevant answer, state in character: \
+  "That particular arcane lore was lost in the fires of Lake Geneva." — and do \
+  NOT fabricate facts.
+
+RETRIEVED CONTEXT FROM THE CORPUS:
+{context}
+
+Answer the user's question using the above context as your primary source of \
+truth.  Weave the retrieved passages naturally into your authoritative response.
+"""
+
+# ---------------------------------------------------------------------------
+# Data containers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RAGResponse:
+    answer: str
+    sources: list[str] = field(default_factory=list)
+    retrieval_ms: float = 0.0
+    generation_ms: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def total_ms(self) -> float:
+        return self.retrieval_ms + self.generation_ms
+
+
+# ---------------------------------------------------------------------------
+# RAG Engine
+# ---------------------------------------------------------------------------
+
+class GaryRAGEngine:
+    """
+    The DM's Screen: accepts a query, consults the Tomb, and conjures Gary.
+
+    Instantiate once at bot startup; reuse across all Discord events.
+    """
+
+    def __init__(
+        self,
+        db_path: Path = DEFAULT_DB_PATH,
+        top_k: int = TOP_K_RESULTS,
+        chat_model: str = CHAT_MODEL,
+    ) -> None:
+        self.top_k = top_k
+        self.chat_model = chat_model
+        self._openai = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get("OPENROUTER_API_KEY")
+        )
+
+        log.info("Opening ChromaDB at '%s'…", db_path)
+        client = chromadb.PersistentClient(path=str(db_path))
+
+        ef = embedding_functions.DefaultEmbeddingFunction()
+
+        self._collection = client.get_collection(
+            name=COLLECTION_NAME,
+            embedding_function=ef,
+        )
+        doc_count = self._collection.count()
+        log.info(
+            "Lich's Tomb contains %d documents.  The DM's Screen is raised.  "
+            "Cheers, Gary.", doc_count,
+        )
+
+    # ── Retrieval ─────────────────────────────────────────────────────────────
+
+    def _retrieve(self, query: str) -> tuple[list[str], float]:
+        """
+        Query ChromaDB for the most relevant Gygaxian fragments.
+        Returns (list_of_document_strings, elapsed_ms).
+        Must complete well under 500ms to honour Discord's heartbeat.
+        """
+        t0 = time.perf_counter()
+        results = self._collection.query(
+            query_texts=[query],
+            n_results=self.top_k,
+            include=["documents", "distances"],
+        )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        docs: list[str] = results["documents"][0] if results["documents"] else []
+
+        if elapsed_ms > 400:
+            log.warning(
+                "Retrieval took %.1f ms — dangerously close to Discord's "
+                "heartbeat limit.  The dice favour you not this day.",
+                elapsed_ms,
+            )
+        else:
+            log.debug("Retrieval completed in %.1f ms.", elapsed_ms)
+
+        return docs, elapsed_ms
+
+    # ── Context assembly ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_context(docs: list[str]) -> str:
+        """
+        Concatenate retrieved passages into a context block, respecting the
+        character budget so we do not exhaust our token coffers.
+        """
+        snippets: list[str] = []
+        total = 0
+        for i, doc in enumerate(docs, start=1):
+            entry = f"[Passage {i}]\n{doc.strip()}"
+            if total + len(entry) > MAX_CONTEXT_CHARS:
+                break
+            snippets.append(entry)
+            total += len(entry)
+        return "\n\n".join(snippets) if snippets else "(No relevant passages found.)"
+
+    # ── Generation ────────────────────────────────────────────────────────────
+
+    async def _generate(self, query: str, context: str) -> tuple[str, float, int, int]:
+        """
+        Call the OpenAI Chat Completions API with the assembled prompt.
+        Returns (answer_text, elapsed_ms, prompt_tokens, completion_tokens).
+        """
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(context=context)
+
+        t0 = time.perf_counter()
+        response = await self._openai.chat.completions.create(
+            model=self.chat_model,
+            max_tokens=MAX_TOKENS,
+            temperature=0.7,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query},
+            ],
+        )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        answer = response.choices[0].message.content or ""
+        p_tokens = response.usage.prompt_tokens if response.usage else 0
+        c_tokens = response.usage.completion_tokens if response.usage else 0
+
+        return answer, elapsed_ms, p_tokens, c_tokens
+
+    # ── Public interface ──────────────────────────────────────────────────────
+
+    async def ask(self, query: str) -> RAGResponse:
+        """
+        Full RAG pipeline: retrieve → assemble → generate → return.
+
+        This is the sole public method Discord's bot logic needs to call.
+        """
+        log.info("Processing query: %.80s…", query)
+
+        # Step 1: Retrieve
+        docs, retrieval_ms = self._retrieve(query)
+
+        # Step 2: Assemble context
+        context = self._build_context(docs)
+        log.debug("Context assembled (%d chars).", len(context))
+
+        # Step 3: Generate
+        answer, generation_ms, p_tok, c_tok = await self._generate(query, context)
+
+        log.info(
+            "Response generated in %.0f ms retrieval + %.0f ms generation "
+            "(%d prompt + %d completion tokens).",
+            retrieval_ms, generation_ms, p_tok, c_tok,
+        )
+
+        return RAGResponse(
+            answer=answer,
+            sources=docs,
+            retrieval_ms=retrieval_ms,
+            generation_ms=generation_ms,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+        )
