@@ -29,8 +29,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-TOP_K_RESULTS = 5          # retrieve the five most relevant scrolls
-MAX_CONTEXT_CHARS = 2_000  # trim retrieved context to stay within token budget
+TOP_K_RESULTS = 30         # Retrieve vastly more context now that we have a massive pool
+MAX_CONTEXT_CHARS = 12_000 # Expand context window for gpt-4o's massive capacity
 CHAT_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
 MAX_TOKENS = 600           # Gary is verbose, but not infinitely so
 
