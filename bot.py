@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -183,9 +184,23 @@ async def on_message(message: discord.Message) -> None:
     content_lower = message.content.lower()
     mentioned = bot.user in message.mentions
     keyword_match = any(kw in content_lower for kw in GARY_KEYWORDS)
+    
+    interject = random.random() < 0.05
 
-    if not (mentioned or keyword_match):
+    if not (mentioned or keyword_match or interject):
         return
+
+    # If it's purely a random interjection, 50% chance to just react with an emoji quietly
+    if interject and not (mentioned or keyword_match):
+        if random.random() < 0.5:
+            # Emojis: d20, dragon, dagger, scroll, shield, skull
+            emojis = ["\U0001F3B2", "\U0001F409", "\U0001F5E1\U0000FE0F", "\U0001F4DC", "\U0001F6E1\U0000FE0F", "\U0001F480"]
+            try:
+                await message.add_reaction(random.choice(emojis))
+                log.info("Interjecting with a Gygaxian emoji.")
+            except Exception as e:
+                log.warning("Failed to add reaction: %s", e)
+            return
 
     # Strip the mention prefix if present so Gary doesn't answer "who are you"
     query = message.content
@@ -193,6 +208,10 @@ async def on_message(message: discord.Message) -> None:
         query = query.replace(bot.user.mention, "").strip()
     if not query:
         query = "Greet the assembled adventurers in your customary fashion."
+
+    # Give Gary some context if he is voluntarily chiming in
+    if interject and not (mentioned or keyword_match):
+        query = f"(System Note: You are unsolicitedly chiming in on this conversation. Be brief and opinionated.) {query}"
 
     async with message.channel.typing():
         await _handle_query(message.channel, query,
