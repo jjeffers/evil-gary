@@ -13,6 +13,7 @@ __pycache__/
 
 # Logs
 logs/
+dumps/
 
 # Data
 data/corpus.txt

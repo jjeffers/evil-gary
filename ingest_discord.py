@@ -64,6 +64,8 @@ class IngestClient(discord.Client):
         # Load model entirely synchronously since its initialization is heavy
         model = await asyncio.to_thread(SentenceTransformer, "all-MiniLM-L6-v2")
         
+        os.makedirs("dumps", exist_ok=True)
+        
         for ch_id in self.target_channels:
             channel = self.get_channel(ch_id)
             if channel is None:
@@ -74,6 +76,10 @@ class IngestClient(discord.Client):
                     continue
                 
             log.info(f"Beginning ingestion for channel: '{channel.name}' from {CUTOFF_DATE} forwards...")
+            
+            # Open a text dump file for the channel
+            safe_name = "".join(c for c in channel.name if c.isalnum() or c in ("-", "_")).rstrip()
+            dump_file = open(f"dumps/{safe_name}_{ch_id}.txt", "w", encoding="utf-8")
             
             messages_batch = []
             total_upserted = 0
@@ -94,11 +100,14 @@ class IngestClient(discord.Client):
                     # Format text specifically so Gary knows WHO said what
                     formatted_text = f"User '{msg.author.display_name}' said: {content}"
                     
+                    # Write to the local text dump
+                    dump_file.write(f"[{msg.created_at.isoformat()}] {formatted_text}\n")
+                    
                     messages_batch.append({
                         "id": f"discord_{msg.id}",
                         "content": formatted_text,
                         "metadata": {
-                            "source": f"discord_channel:{ch_id}",
+                            "source": f"discord:{channel.name}",
                             "author": msg.author.display_name,
                             "timestamp": msg.created_at.isoformat(),
                             "type": "chat_log"
@@ -117,9 +126,11 @@ class IngestClient(discord.Client):
                     messages_batch = []
                     
                 log.info(f"Finished channel '{channel.name}'. Totally upserted {total_upserted} substantive messages.")
+                dump_file.close()
                 
             except Exception as e:
                 log.exception(f"Error fetching history for channel {ch_id}: {e}")
+                dump_file.close()
             
         log.info("All historical ingestion across targeted channels is complete! Closing connection.")
         await self.close()
