@@ -9,6 +9,7 @@ Usage:
     python ingest_discord.py
 """
 
+import argparse
 import asyncio
 import datetime
 import logging
@@ -27,7 +28,7 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 # The great cataclysm before which we do not search
-CUTOFF_DATE = datetime.datetime(2020, 8, 18, tzinfo=datetime.timezone.utc)
+DEFAULT_CUTOFF_DATE = datetime.datetime(2020, 8, 18, tzinfo=datetime.timezone.utc)
 BATCH_SIZE = 100
 
 def parse_channels() -> list[int]:
@@ -40,11 +41,12 @@ def parse_channels() -> list[int]:
     return chans
 
 class IngestClient(discord.Client):
-    def __init__(self, channels: list[int]):
+    def __init__(self, channels: list[int], cutoff_date: datetime.datetime):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
         self.target_channels = channels
+        self.cutoff_date = cutoff_date
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -75,7 +77,7 @@ class IngestClient(discord.Client):
                     log.warning(f"Could not access channel {ch_id} (does the bot have access?): {e}")
                     continue
                 
-            log.info(f"Beginning ingestion for channel: '{channel.name}' from {CUTOFF_DATE} forwards...")
+            log.info(f"Beginning ingestion for channel: '{channel.name}' from {self.cutoff_date} forwards...")
             
             # Open a text dump file for the channel
             safe_name = "".join(c for c in channel.name if c.isalnum() or c in ("-", "_")).rstrip()
@@ -86,7 +88,7 @@ class IngestClient(discord.Client):
             
             try:
                 # Iterate from the oldest messages forwards
-                async for msg in channel.history(limit=None, after=CUTOFF_DATE, oldest_first=True):
+                async for msg in channel.history(limit=None, after=self.cutoff_date, oldest_first=True):
                     # Ignore bot messages (including Gary himself) and empty messages
                     if msg.author.bot or not msg.content.strip():
                         continue
@@ -152,6 +154,10 @@ class IngestClient(discord.Client):
         log.info(f"  --> Upserted {len(batch)} message chunks into the Supabase vector store...")
 
 def main():
+    parser = argparse.ArgumentParser(description="Ingest Discord chat logs.")
+    parser.add_argument("--days-back", type=int, default=None, help="Number of days back to start fetching.")
+    args = parser.parse_args()
+
     load_dotenv()
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
@@ -163,7 +169,12 @@ def main():
         log.error("PASSIVE_CHANNEL_IDS not set or invalid in .env. There are no channels to index.")
         sys.exit(1)
         
-    client = IngestClient(channels)
+    if args.days_back is not None:
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days_back)
+    else:
+        cutoff = DEFAULT_CUTOFF_DATE
+        
+    client = IngestClient(channels, cutoff_date=cutoff)
     log.info("Starting historical client...")
     client.run(token, log_handler=None)
 
