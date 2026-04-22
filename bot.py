@@ -25,6 +25,8 @@ Col_Pladoh
 
 from __future__ import annotations
 
+import asyncio
+import datetime
 import logging
 import os
 import random
@@ -33,7 +35,7 @@ from pathlib import Path
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from rag_engine import GaryRAGEngine
 from token_logger import TokenLogger
@@ -159,6 +161,8 @@ async def on_ready() -> None:
 
     if PASSIVE_CHANNELS:
         log.info("Passive listening enabled in channels: %s", PASSIVE_CHANNELS)
+        if not auto_ingest_discord.is_running():
+            auto_ingest_discord.start()
     log.info("Gary is ready to adjudicate.  Cheers, Gary.")
 
 
@@ -316,6 +320,123 @@ async def _handle_query(
     except Exception as exc:
         log.exception("Error in passive handler: %s", exc)
         await channel.send(ERRORS["generic"])  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Background Tasks
+# ---------------------------------------------------------------------------
+
+@tasks.loop(hours=24)
+async def auto_ingest_discord() -> None:
+    """
+    Daily incremental ingestion of Discord chat logs.
+    Re-uses the existing RAG engine's database and sentence-transformer model
+    to avoid memory swap thrashing.
+    """
+    if not _engine_ready():
+        return
+        
+    log.info("Starting daily auto-ingestion of Discord logs...")
+    
+    assert _engine is not None
+    supabase = _engine._supabase
+    model = _engine._model
+
+    try:
+        # Query Supabase for the most recent chat log timestamp
+        response = supabase.table("gary_knowledge").select("metadata").eq("metadata->>type", "chat_log").order("metadata->timestamp", desc=True).limit(1).execute()
+        if response.data and response.data[0].get("metadata", {}).get("timestamp"):
+            last_timestamp_str = response.data[0]["metadata"]["timestamp"]
+            cutoff_date = datetime.datetime.fromisoformat(last_timestamp_str)
+            log.info(f"Last ingested message timestamp found: {cutoff_date}")
+        else:
+            cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+            log.info("No previous chat logs found. Defaulting cutoff to 2 days ago.")
+    except Exception as e:
+        log.warning(f"Failed to fetch last timestamp from Supabase: {e}. Defaulting to 2 days ago.")
+        cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+    
+    BATCH_SIZE = 100
+    
+    os.makedirs("dumps", exist_ok=True)
+    
+    for ch_id in PASSIVE_CHANNELS:
+        channel = bot.get_channel(ch_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(ch_id)
+            except Exception as e:
+                log.warning(f"Could not access channel {ch_id} for ingestion: {e}")
+                continue
+                
+        log.info(f"Auto-ingesting channel: '{channel.name}' from {cutoff_date} forwards...")
+        
+        safe_name = "".join(c for c in channel.name if c.isalnum() or c in ("-", "_")).rstrip()
+        dump_file = open(f"dumps/{safe_name}_{ch_id}_daily.txt", "w", encoding="utf-8")
+        
+        messages_batch = []
+        total_upserted = 0
+        
+        try:
+            async for msg in channel.history(limit=None, after=cutoff_date, oldest_first=True):
+                if msg.author.bot or not msg.content.strip():
+                    continue
+                    
+                content = msg.content.strip()
+                if len(content) < 15:
+                    continue
+                    
+                formatted_text = f"User '{msg.author.display_name}' said: {content}"
+                dump_file.write(f"[{msg.created_at.isoformat()}] {formatted_text}\n")
+                
+                messages_batch.append({
+                    "id": f"discord_{msg.id}",
+                    "content": formatted_text,
+                    "metadata": {
+                        "source": f"discord:{channel.name}",
+                        "author": msg.author.display_name,
+                        "timestamp": msg.created_at.isoformat(),
+                        "type": "chat_log"
+                    }
+                })
+                
+                if len(messages_batch) >= BATCH_SIZE:
+                    texts = [b["content"] for b in messages_batch]
+                    embeddings = await asyncio.to_thread(model.encode, texts)
+                    for i, emb in enumerate(embeddings.tolist()):
+                        messages_batch[i]["embedding"] = emb
+                        
+                    def _upsert(b=messages_batch):
+                        supabase.table("gary_knowledge").upsert(b).execute()
+                        
+                    await asyncio.to_thread(_upsert)
+                    total_upserted += len(messages_batch)
+                    messages_batch = []
+                    
+            if messages_batch:
+                texts = [b["content"] for b in messages_batch]
+                embeddings = await asyncio.to_thread(model.encode, texts)
+                for i, emb in enumerate(embeddings.tolist()):
+                    messages_batch[i]["embedding"] = emb
+                    
+                def _upsert(b=messages_batch):
+                    supabase.table("gary_knowledge").upsert(b).execute()
+                    
+                await asyncio.to_thread(_upsert)
+                total_upserted += len(messages_batch)
+                
+            log.info(f"Finished auto-ingest for '{channel.name}'. Upserted {total_upserted} messages.")
+            dump_file.close()
+            
+        except Exception as e:
+            log.exception(f"Error auto-ingesting history for channel {ch_id}: {e}")
+            dump_file.close()
+            
+    log.info("Daily auto-ingestion completed.")
+
+@auto_ingest_discord.before_loop
+async def before_auto_ingest_discord():
+    await bot.wait_until_ready()
 
 
 # ---------------------------------------------------------------------------

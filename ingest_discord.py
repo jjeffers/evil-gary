@@ -1,6 +1,11 @@
 """
 ingest_discord.py — The Chronicler
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[IMPORTANT] 
+DO NOT run this script as a daily cron job! 
+Daily incremental syncs are now handled automatically by bot.py in the background.
+This script should ONLY be used manually for one-off deep historical backfills.
+
 Connects to Discord, downloads messaging history from PASSIVE_CHANNEL_IDS
 going back to a specific cutoff date, and embeds the chat logs into the
 Supabase vector database.
@@ -155,7 +160,8 @@ class IngestClient(discord.Client):
 
 def main():
     parser = argparse.ArgumentParser(description="Ingest Discord chat logs.")
-    parser.add_argument("--days-back", type=int, default=None, help="Number of days back to start fetching.")
+    parser.add_argument("--days-back", type=int, default=3, help="Number of days back to fetch. Defaults to 3 for fast cron runs.")
+    parser.add_argument("--full-history", action="store_true", help="Fetch all history back to 2020.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -169,10 +175,10 @@ def main():
         log.error("PASSIVE_CHANNEL_IDS not set or invalid in .env. There are no channels to index.")
         sys.exit(1)
         
-    if args.days_back is not None:
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days_back)
-    else:
+    if args.full_history:
         cutoff = DEFAULT_CUTOFF_DATE
+    else:
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days_back)
         
     client = IngestClient(channels, cutoff_date=cutoff)
     log.info("Starting historical client...")
