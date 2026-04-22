@@ -132,6 +132,7 @@ class GaryRAGEngine:
         Returns (list_of_document_strings, elapsed_ms).
         Must complete well under 500ms to honour Discord's heartbeat.
         """
+        import re
         t0 = time.perf_counter()
         
         # 1. Embed query
@@ -147,9 +148,19 @@ class GaryRAGEngine:
             }
         ).execute()
         
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-
         docs: list[str] = [doc["content"] for doc in response.data] if response.data else []
+
+        # 3. Exact match for session numbers (fallback for embeddings that fail on numerical IDs)
+        session_matches = re.findall(r'(?:session|#)\s*(\d+)', query, re.IGNORECASE)
+        if session_matches:
+            # Deduplicate numbers
+            for num in set(session_matches):
+                exact = self._supabase.table("gary_knowledge").select("content").ilike("content", f"%#{num}%").limit(5).execute()
+                if exact.data:
+                    # Prepend exact matches
+                    docs = [d["content"] for d in exact.data if d["content"] not in docs] + docs
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000
 
         if elapsed_ms > 400:
             log.warning(

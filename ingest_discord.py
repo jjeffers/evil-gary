@@ -71,6 +71,20 @@ class IngestClient(discord.Client):
         # Load model entirely synchronously since its initialization is heavy
         model = await asyncio.to_thread(SentenceTransformer, "all-MiniLM-L6-v2")
         
+        log.info("Fetching existing message IDs to prevent re-ingestion...")
+        existing_ids = set()
+        limit = 1000
+        offset = 0
+        while True:
+            resp = supabase.table("gary_knowledge").select("id").like("id", "discord_%").range(offset, offset + limit - 1).execute()
+            if not resp.data:
+                break
+            for row in resp.data:
+                existing_ids.add(row["id"])
+            offset += limit
+            
+        log.info(f"Found {len(existing_ids)} existing Discord messages in the database.")
+        
         os.makedirs("dumps", exist_ok=True)
         
         for ch_id in self.target_channels:
@@ -104,6 +118,10 @@ class IngestClient(discord.Client):
                     if len(content) < 15:
                         continue
                         
+                    msg_id_str = f"discord_{msg.id}"
+                    if msg_id_str in existing_ids:
+                        continue
+                        
                     # Format text specifically so Gary knows WHO said what
                     formatted_text = f"User '{msg.author.display_name}' said: {content}"
                     
@@ -111,7 +129,7 @@ class IngestClient(discord.Client):
                     dump_file.write(f"[{msg.created_at.isoformat()}] {formatted_text}\n")
                     
                     messages_batch.append({
-                        "id": f"discord_{msg.id}",
+                        "id": msg_id_str,
                         "content": formatted_text,
                         "metadata": {
                             "source": f"discord:{channel.name}",
@@ -152,7 +170,16 @@ class IngestClient(discord.Client):
             batch[i]["embedding"] = emb
             
         def _upsert():
-            supabase.table("gary_knowledge").upsert(batch).execute()
+            import time
+            for attempt in range(5):
+                try:
+                    supabase.table("gary_knowledge").upsert(batch).execute()
+                    return
+                except Exception as e:
+                    if attempt == 4:
+                        raise e
+                    log.warning(f"Upsert failed, retrying in 2 seconds... ({e})")
+                    time.sleep(2)
             
         # Offload sync I/O upsert
         await asyncio.to_thread(_upsert)
